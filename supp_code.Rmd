@@ -1,0 +1,916 @@
+---
+title: "Supplementary code"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This document provides all code for recreating the analyses published in Bird et al. Seeing the future. Where could invasive species eradication take us?
+
+It builds on models developed for Bird J, Fuller RA, Terauds A, et al. 2021a. Detecting seabird responses to invasive species eradication. bioRxiv: 2021.04.07.438876.
+
+We refer readers there for methods for model development and selection etc.
+
+In places we adjust population estimates using occupancy data from Bird, J. P., Fuller, R. A., Pascoe, P. P., & Shaw, J. D. 2021. Using camera traps to determine occupancy and breeding in burrowing seabirds. bioRxiv. https://doi.org/10.1101/2021.04.08.438875
+
+Load libraries for analyses.
+
+```{r packages}
+library(tidyverse) # for data minpulation and plotting
+library(dsm) # for DSMs
+library(sf) # for spatial analyses and plotting
+library(raster) # for spatial analyses and plotting
+library(dismo) # for BRTs
+library(gbm) # for BRTs
+library(scico) # for plot colours
+library(ggnewscale) # for adjusting plot scales
+#library(Distance)
+#library(mgcv)
+#library(mads)
+#library(knitr)
+#library(kableExtra)
+#library(gridExtra)
+#library(tabularaster)
+```
+
+Load data for analyses.
+
+```{r}
+load("data.RData")
+```
+
+
+## Presence-only models
+
+### Antarctic Prion
+
+Data come from Bird et al. (2021a). Observations from transects are filtered to remove all absences (zeros). Then a density surface model is built for the presence-only data using the dsm packacge - see Bird et al. (2021a) for full methods.
+
+```{r presence-only ap}
+# create presence-only data
+seg_ap1 <- seg_ap %>% filter(Sample.Label %in% ap$Sample.Label)
+
+# run models with different families to explore fit
+# quasipoisson
+dsm_ap_qp_pres <- dsm(count~s (dem, k=10) +
+                    s (ndvi, k=10) +
+                    s (ridge,k=10) +
+                    s (slope, k=10) +
+                    s (wetness, k=10) +
+                    s (wind, k=10),
+               ddf.obj=ap_detfc, segment.data=seg_ap1, 
+               observation.data=ap, family=quasipoisson(), 
+               segment.area=seg_ap1$area, keepData=TRUE, method="REML")
+# par(mfrow=c(2, 2))
+# gam.check(dsm_ap_qp_pres)
+# summary(dsm_ap_qp_pres)
+
+# negative-binomial
+dsm_ap_nb_pres <- dsm(count~s (dem, k=10) +
+                    s (ndvi, k=10) +
+                    s (ridge,k=10) +
+                    s (slope, k=10) +
+                    s (wetness, k=10) +
+                    s (wind, k=10),
+               ddf.obj=ap_detfc, segment.data=seg_ap1, 
+               observation.data=ap, family=nb(), 
+               segment.area=seg_ap1$area, keepData=TRUE, method="REML")
+# par(mfrow=c(2, 2))
+# gam.check(dsm_ap_nb_pres)
+# summary(dsm_ap_nb_pres)
+
+# tweedie
+dsm_ap_tw_pres <- dsm(count~s (dem, k=10) +
+                    s (ndvi, k=10) +
+                    s (ridge,k=10) +
+                    s (slope, k=10) +
+                    s (wetness, k=10) +
+                    s (wind, k=10),
+               ddf.obj=ap_detfc, segment.data=seg_ap1, 
+               observation.data=ap, family=tw(), 
+               segment.area=seg_ap1$area, keepData=TRUE, method="REML")
+# par(mfrow=c(2, 2))
+# gam.check(dsm_ap_tw_pres)
+# summary(dsm_ap_tw_pres)
+
+# negative-binomial model has lowest AIC and diagnostics suggest a marginally better fit
+```
+
+```{r model testing ap}
+dsm_ap_nb_pres1 <- dsm(count~s (dem, k=10) +
+                    s (ndvi, k=10) +
+                    s (slope, k=10) +
+                    s (wetness, k=10) +
+                    s (wind, k=10),
+               ddf.obj=ap_detfc, segment.data=seg_ap1, 
+               observation.data=ap, family=nb(), 
+               segment.area=seg_ap1$area, keepData=TRUE, method="REML") # drop ridge (highest non-signif p-values)
+# par(mfrow=c(2, 2))
+# gam.check(dsm_ap_nb_pres1)
+# summary(dsm_ap_nb_pres1)
+
+dsm_ap_nb_pres2 <- dsm(count~s (dem, k=10) +
+                    s (ndvi, k=10) +
+                    s (slope, k=10) +
+                    s (wind, k=10),
+               ddf.obj=ap_detfc, segment.data=seg_ap1, 
+               observation.data=ap, family=nb(), 
+               segment.area=seg_ap1$area, keepData=TRUE, method="REML") # drop wetness (highest non-signif p-value)
+# par(mfrow=c(2, 2))
+# gam.check(dsm_ap_nb_pres2)
+# summary(dsm_ap_nb_pres2)
+
+# all terms coming out as significant.
+```
+
+```{r summarise dsms function}
+summarize_dsm <- function(model){
+
+  summ <- summary(model)
+
+  data.frame(response = model$family$family,
+             terms    = paste(rownames(summ$s.table), collapse=", "),
+             "Adjusted R.sq" = round(summ$r.sq,2),
+             AIC      = AIC(model),
+             REML     = model$gcv.ubre,
+             "Deviance_explained" = paste0(round(summ$dev.expl*100,2),"%")
+            )
+
+}
+```
+
+```{r dsm selection ap}
+dsms_ap <- mget(ls(pattern = "dsm_ap"))
+tab_ap <- plyr::ldply(dsms_ap, summarize_dsm)
+# simpler nb model has lowest AIC
+```
+
+Having selected a model now predict density across Macquarie Island.
+
+```{r prediction ap}
+mac$area <- 400
+
+over_pred_ap <- predict(dsm_ap_nb_pres2, mac, off.set=mac$area)
+
+# estimate the total number of burrows predicted island-wide
+brw_oest_ap <- sum(over_pred_ap, na.rm = T)
+over_pred_apd <- over_pred_ap/400 # turn the estimated abundance into density
+
+# calculate uncertainty using the delta method
+mac_var <- mac[!is.na(mac$ndvi),]
+over_pred_ap_var <- dsm.var.gam(dsm_ap_nb_pres2, pred.data = mac_var, off.set=mac_var$area)
+over_ap_ci <- summary(over_pred_ap_var) # simple uncertainty
+
+# setup the storage for the predictions
+over_ap_raster <- raster(sta)
+# put the values in, making sure they are numeric first
+over_ap_raster <- setValues(over_ap_raster, as.numeric(over_pred_apd))
+# name the new, last, layer in the stack
+names(over_ap_raster) <- "dsm_ap_nb_pres2"
+
+```
+
+And use the modelled density to calculate a projected population estimate corrected for occupancy (as measured during surveys in 2017-2018).
+
+```{r ap presence-only model pop estimate}
+# correct brw est for occupancy
+pop_oest_ap <- sum(over_pred_ap*ap_occ, na.rm = T)
+
+# work out uncertainty using delta method to combine burrows and occupancy:
+# get CV of occ and brw ests
+ap_occ_cv <- ap_occ_se/ap_occ
+brw_oest_ap_cv <- summary(over_pred_ap_var)$cv
+# combine cv's
+pop_oest_ap_cv <- sqrt((brw_oest_ap_cv^2) + (ap_occ_cv^2))
+
+# 95% CIs for pop est
+var.D <- (pop_oest_ap_cv*pop_oest_ap)^2
+var.logD <- log(1+(var.D/(pop_oest_ap^2)))
+
+c.value <- exp(1.96*(sqrt(var.logD)))
+
+# upper and lower CIs
+pop_oest_ap_upr <- pop_oest_ap*c.value
+pop_oest_ap_lwr <- pop_oest_ap/c.value
+```
+
+
+### White-headed Petrel
+
+Data come from Bird et al. (2021a). Observations from transects are filtered to remove all absences (zeros). Then a density surface model is built for the presence-only data using the dsm packacge - see Bird et al. (2021a) for full methods.
+
+```{r presence-only whp}
+seg_whp1 <- seg_whp %>% filter(Sample.Label %in% whp$Sample.Label)
+
+# run models with different families to explore fit
+# quasipoisson
+dsm_whp_qp_pres <- dsm(count~s (dem, k=10) +
+                    s (ndvi, k=10) +
+                    s (ridge,k=10) +
+                    s (slope, k=10) +
+                    s (wetness, k=10) +
+                    s (wind, k=10),
+               ddf.obj=whp_detfc, segment.data=seg_whp1, 
+               observation.data=whp, family=quasipoisson(), 
+               segment.area=seg_whp1$area, keepData=TRUE, method="REML")
+# par(mfrow=c(2, 2))
+# gam.check(dsm_whp_qp_pres)
+# summary(dsm_whp_qp_pres)
+
+# negative-binomial
+dsm_whp_nb_pres <- dsm(count~s (dem, k=10) +
+                    s (ndvi, k=10) +
+                    s (ridge,k=10) +
+                    s (slope, k=10) +
+                    s (wetness, k=10) +
+                    s (wind, k=10),
+               ddf.obj=whp_detfc, segment.data=seg_whp1, 
+               observation.data=whp, family=nb(), 
+               segment.area=seg_whp1$area, keepData=TRUE, method="REML")
+# par(mfrow=c(2, 2))
+# gam.check(dsm_whp_nb_pres)
+# summary(dsm_whp_nb_pres)
+
+# tweedie
+dsm_whp_tw_pres <- dsm(count~s (dem, k=10) +
+                    s (ndvi, k=10) +
+                    s (ridge,k=10) +
+                    s (slope, k=10) +
+                    s (wetness, k=10) +
+                    s (wind, k=10),
+               ddf.obj=whp_detfc, segment.data=seg_whp1, 
+               observation.data=whp, family=tw(), 
+               segment.area=seg_whp1$area, keepData=TRUE, method="REML")
+# par(mfrow=c(2, 2))
+# gam.check(dsm_whp_tw_pres)
+# summary(dsm_whp_tw_pres)
+
+# negative-binomial model gives the best fit to the data and lowest AIC
+```
+
+```{r model testing whp}
+dsm_whp_nb_pres1 <- dsm(count~s (dem, k=10) +
+                    s (ndvi, k=10) +
+                    s (slope, k=10) +
+                    s (wetness, k=10) +
+                    s (wind, k=10),
+               ddf.obj=whp_detfc, segment.data=seg_whp1, 
+               observation.data=whp, family=nb(), 
+               segment.area=seg_whp1$area, keepData=TRUE, method="REML") # drop ridge (highest non-signif p-values)
+# par(mfrow=c(2, 2))
+# gam.check(dsm_whp_nb_pres1)
+# summary(dsm_whp_nb_pres1)
+
+dsm_whp_nb_pres2 <- dsm(count~s (dem, k=10) +
+                    s (slope, k=10) +
+                    s (wetness, k=10) +
+                    s (wind, k=10),
+               ddf.obj=whp_detfc, segment.data=seg_whp1, 
+               observation.data=whp, family=nb(), 
+               segment.area=seg_whp1$area, keepData=TRUE, method="REML") # drop wetness (highest non-signif p-value)
+# par(mfrow=c(2, 2))
+# gam.check(dsm_whp_nb_pres2)
+# summary(dsm_whp_nb_pres2)
+
+dsm_whp_nb_pres3 <- dsm(count~s (dem, k=10) +
+                    s (slope, k=10) +
+                    s (wetness, k=10),
+               ddf.obj=whp_detfc, segment.data=seg_whp1, 
+               observation.data=whp, family=nb(), 
+               segment.area=seg_whp1$area, keepData=TRUE, method="REML") # drop wetness (highest non-signif p-value)
+# par(mfrow=c(2, 2))
+# gam.check(dsm_whp_nb_pres3)
+# summary(dsm_whp_nb_pres3)
+
+# all terms coming out as significant.
+```
+
+```{r dsm selection whp}
+dsms_whp <- mget(ls(pattern = "dsm_whp"))
+tab_whp <- plyr::ldply(dsms_whp, summarize_dsm)
+# simplest model has lowest AIC - use for predicting
+```
+
+Having selected a model now predict density across Macquarie Island.
+
+```{r prediction whp}
+over_pred_whp <- predict(dsm_whp_nb_pres3, mac, off.set=mac$area)
+
+# estimate the total number of burrows predicted island-wide
+brw_oest_whp <- sum(over_pred_whp, na.rm = T)
+over_pred_whpd <- over_pred_whp/400 # turn the estimated abundance into density
+
+# calculate uncertainty using the delta method
+mac_var <- mac[!is.na(mac$ndvi),]
+over_pred_whp_var <- dsm.var.gam(dsm_whp_nb_pres3, pred.data = mac_var, off.set=mac_var$area)
+# pred_whp_varprop <- dsm.var.prop(dsm_whp_nb3, pred.data = mac_var, off.set=mac_var$area)
+over_whp_ci <- summary(over_pred_whp_var) # simple uncertainty
+
+# setup the storage for the predictions
+over_whp_raster <- raster(sta)
+# put the values in, making sure they are numeric first
+over_whp_raster <- setValues(over_whp_raster, as.numeric(over_pred_whpd))
+# name the new, last, layer in the stack
+names(over_whp_raster) <- "dsm_whp_nb_pres3"
+
+```
+
+And use the modelled density to calculate a projected population estimate corrected for occupancy (as measured during surveys in 2017-2018).
+
+```{r whp presence-only model pop estimate}
+# correct brw est for occupancy
+pop_oest_whp <- sum(over_pred_whp*whp_cocc, na.rm = T)
+
+# work out uncertainty:
+# get CV of occ and brw ests
+whp_cocc_cv <- whp_cocc_se/whp_cocc
+brw_oest_whp_cv <- summary(over_pred_whp_var)$cv
+# combine cv's
+pop_oest_whp_cv <- sqrt((brw_oest_whp_cv^2) + (whp_cocc_cv^2))
+
+# 95% CIs for pop est
+var.D <- (pop_oest_whp_cv*pop_oest_whp)^2
+var.logD <- log(1+(var.D/(pop_oest_whp^2)))
+
+c.value <- exp(1.96*(sqrt(var.logD)))
+
+# upper and lower CIs
+pop_oest_whp_upr <- pop_oest_whp*c.value
+pop_oest_whp_lwr <- pop_oest_whp/c.value
+```
+
+
+### Blue Petrel
+
+Data come from Bird et al. (2021a). Observations from a targeted whole-island survey were aggregated within cells of a whole-island grid, and filtered to remove all cells with no observations - absences (zeros). Then gams are built for the presence-only data using the mgcv packacge - see Bird et al. (2021a) for full methods.
+
+```{r bp presence model}
+dat_bpp <- dat_bp %>% filter(ct>0)
+
+bpAp <- gam(ct ~  offset(log(area)) +
+              s(dem) + 
+              s(ndvi) +
+              s(ridge) +
+              s(slope) +
+              s(wetness) +
+              s(aspect) +
+              s(wind), data = dat_bpp, family = nb())
+# summary(bpAp)
+# plot(bpAp, pages = 1)
+# par(mfrow=c(2, 2))
+# gam.check(bpAp)
+```
+
+Use the model to predict density across Macquarie Island.
+
+```{r bp pres predictions}
+#library(raster)
+gd <- as.data.frame(sta, xy = TRUE)
+gd$area <- 400 # figure out the offset
+bpAp_p <- predict(bpAp, newdata = gd, type = "response", se.fit = TRUE)
+bpp_est <- (sum(bpAp_p$fit, na.rm=T)) # count per pixel
+bpp_min <- bpp_est - ((sum(bpAp_p$se.fit, na.rm=T))*1.96)
+bpp_max <- bpp_est + ((sum(bpAp_p$se.fit, na.rm=T))*1.96)
+bpAp_pd <- bpAp_p$fit/400 # converting into density of burrows per m^2
+
+bpAp_pr <- raster(sta)
+gd_bpp <- gd
+gd_bpp$cells <- cellFromXY(bpAp_pr, gd_bpp[c("x", "y")])
+bpAp_pr[gd_bpp$cells] <- bpAp_pd
+# par(mfrow=c(1, 1))
+# plot(bpAp_pr)
+
+#detach("package:raster", unload = TRUE)
+```
+
+And use the modelled density to calculate a projected population estimate corrected for occupancy (as measured during surveys in 2017-2018).
+
+```{r bp presence-only model pop estimate}
+# correct brw est for occupancy
+pop_oest_bp <- sum(bpAp_p$fit*bp_occ, na.rm = T)
+
+# work out uncertainty:
+# get CV of occ and brw ests
+bp_occ_cv <- bp_occ_se/bp_occ
+brw_oest_bp_cv <- (sum(bpAp_p$se.fit, na.rm = T)/bpp_est)
+# combine cv's
+pop_oest_bp_cv <- sqrt((brw_oest_bp_cv^2) + (bp_occ_cv^2))
+
+# 95% CIs for pop est
+var.D <- (pop_oest_bp_cv*pop_oest_bp)^2
+var.logD <- log(1+(var.D/(pop_oest_bp^2)))
+
+c.value <- exp(1.96*(sqrt(var.logD)))
+
+# upper and lower CIs
+pop_oest_bp_upr <- pop_oest_bp*c.value
+pop_oest_bp_lwr <- pop_oest_bp/c.value
+```
+
+
+### Grey Petrel
+
+Data come from Bird et al. (2021a). Observations from a targeted whole-island survey were aggregated within cells of a whole-island grid, and filtered to remove all cells with no observations - absences (zeros). Then gams are built for the presence-only data using the mgcv packacge - see Bird et al. (2021a) for full methods.
+
+```{r gp presence model}
+dat_gpp <- dat_gp %>% filter(ct>0)
+
+gpAp <- gam(ct ~  offset(log(area)) +
+              s(dem) + 
+              s(ndvi) +
+              s(ridge) +
+              s(slope) +
+              s(wetness) +
+              s(aspect) +
+              s(wind), data = dat_gpp, family = nb())
+# summary(gpAp)
+# plot(gpAp, pages = 1)
+# par(mfrow=c(2, 2))
+# gam.check(gpAp)
+```
+
+```{r}
+# library(raster)
+# gd <- as.data.frame(sta, xy = TRUE)
+# gd$area <- 400 # figure out the offset
+gpAp_p <- predict(gpAp, newdata = gd, type = "response", se.fit = TRUE)
+gpp_est <- (sum(gpAp_p$fit, na.rm=T)) # count per pixel
+gpp_min <- gpp_est - ((sum(gpAp_p$se.fit, na.rm=T))*1.96)
+gpp_max <- gpp_est + ((sum(gpAp_p$se.fit, na.rm=T))*1.96)
+gpAp_pd <- gpAp_p$fit/400 # converting into density of burrows per m^2
+
+gpAp_pr <- raster(sta)
+gd_gpp <- gd
+gd_gpp$cells <- cellFromXY(gpAp_pr, gd_gpp[c("x", "y")])
+gpAp_pr[gd_gpp$cells] <- gpAp_pd
+# par(mfrow=c(1, 1))
+# plot(gpAp_pr)
+# 
+# detach("package:raster", unload = TRUE)
+```
+
+```{r ap presence-only model pop estimate}
+# correct brw est for occupancy
+pop_oest_gp <- sum(gpAp_p$fit*gp_cocc, na.rm = T)
+
+# work out uncertainty:
+# get CV of occ and brw ests
+gp_cocc_cv <- gp_cocc_se/gp_cocc
+brw_oest_gp_cv <- (sum(gpAp_p$se.fit, na.rm = T)/gpp_est)
+# combine cv's
+pop_oest_gp_cv <- sqrt((brw_oest_gp_cv^2) + (gp_cocc_cv^2))
+
+# 95% CIs for pop est
+var.D <- (pop_oest_gp_cv*pop_oest_gp)^2
+var.logD <- log(1+(var.D/(pop_oest_gp^2)))
+
+c.value <- exp(1.96*(sqrt(var.logD)))
+
+# upper and lower CIs
+pop_oest_gp_upr <- pop_oest_gp*c.value
+pop_oest_gp_lwr <- pop_oest_gp/c.value
+```
+
+
+### Figure 2
+
+Figure 2 overlays the current distributions of all species (taken from Bird et al. 2021a) in the first panel, and then plots the presence-only modelled predictions made above in the remaining panels, one for each species.
+
+```{r adjusting lat/long scales}
+scale_x_longitude <- function(xmin=-180, xmax=180, step=1, ...) {
+    ewbrks <- seq(xmin,xmax,step)
+    ewlbls <- unlist(lapply(ewbrks, function(x) ifelse(x < 0, paste(x, "W"), ifelse(x > 0, paste(x, "E"),x))))
+    return(scale_x_continuous("Longitude", breaks = ewbrks, labels = ewlbls, expand = c(0, 0), ...))
+}
+scale_y_latitude <- function(ymin=-90, ymax=90, step=0.5, ...) {
+    nsbrks <- seq(ymin,ymax,step)
+    nslbls <- unlist(lapply(nsbrks, function(x) ifelse(x < 0, paste(x, "S"), ifelse(x > 0, paste(x, "N"),x))))
+    return(scale_y_continuous("Latitude", breaks = nsbrks, labels = nslbls, expand = c(0, 0), ...))
+}
+```
+
+```{r coast}
+# coast layer
+crs <- st_crs(ccoast)
+ccoast_buff <- st_buffer(ccoast, dist = 800)
+```
+
+Panel 1, current distribution of all species.
+
+```{r panel 1}
+# filter only pixels with >1 breeding pair predicted
+pr_apf <- pr_ap %>% filter(pc > 1)
+pr_whpf <- pr_whp %>% filter(pc > 1)
+
+# normalise densities for all spp.
+pr_apr <- pr_apf %>% filter(pd > quantile(pd, 0.025) & pd < quantile(pd, 0.975)) %>% 
+         mutate(pd_norm = (pd-min(pd))/diff(range(pd)))
+pr_whpr <- pr_whpf %>% filter(pd > quantile(pd, 0.025) & pd < quantile(pd, 0.975)) %>% 
+           mutate(pd_norm = (pd-min(pd))/diff(range(pd)))
+gdat_gpr <- gdat_gp %>% filter(dens > quantile(dens, 0.025) & dens < quantile(dens, 0.975)) %>% 
+         mutate(pd_norm = (dens-min(dens))/diff(range(dens)))
+gdat_bpr <- gdat_bp %>% filter(dens > quantile(dens, 0.025) & dens < quantile(dens, 0.975)) %>% 
+         mutate(pd_norm = (dens-min(dens))/diff(range(dens)))
+
+ggplot() +
+    # set-up plot background etc.
+    geom_sf(fill = 'grey25', data = ccoast) +
+    geom_sf(fill = NA, colour = NA, data = ccoast_buff) +
+    scale_x_longitude(158.8, 158.9, step = 0.1) +
+    # add GP layer #440154FF #E0754FFF
+    geom_sf(data = gdat_gpr, aes(col = pd_norm), show.legend = T) +
+    scale_color_gradient(low = "transparent", high = "#440154FF", aesthetics = 'colour') +
+    # add BP layer #33638DFF #2A5934FF
+    new_scale_colour() +
+    geom_sf(data = gdat_bpr, aes(col = pd_norm), show.legend = T) +
+    scale_color_gradient(low = "transparent", high = "#33638DFF", aesthetics = 'colour') +
+    # add WHP layer #3CBB75FF #2B5B99FF
+    new_scale_fill() +
+    geom_raster(aes(x=x, y=y, fill=pd_norm), data = pr_whpr) +
+    scale_fill_gradient(low = "transparent", high = "#3CBB75FF", aesthetics = 'fill') +
+    # add AP layer #FDE725FF #C36D9AFF
+    new_scale_fill() +
+    geom_raster(aes(x=x, y=y, fill=pd_norm), data = pr_apr) +
+    scale_fill_gradient(low = "transparent", high = "#FDE725FF", aesthetics = 'fill') +
+    theme_bw()
+```
+
+Projected distributions based upon presence-only models - individual species maps
+
+```{r normalise presence-only predictions}
+# normalise projected distribution layer for AP
+pr_fap <- as.data.frame(over_ap_raster, xy = T) %>% 
+         drop_na() %>% 
+         filter(dsm_ap_nb_pres2 > quantile(dsm_ap_nb_pres2, 0.025) & 
+                dsm_ap_nb_pres2 < quantile(dsm_ap_nb_pres2, 0.975)) %>% 
+         mutate(pd_norm = (dsm_ap_nb_pres2-min(dsm_ap_nb_pres2))/diff(range(dsm_ap_nb_pres2))) 
+
+# normalise projected distribution layer for AP
+pr_fwhp <- as.data.frame(over_whp_raster, xy = T) %>% 
+         drop_na() %>% 
+         filter(dsm_whp_nb_pres3 > quantile(dsm_whp_nb_pres3, 0.025) & 
+                dsm_whp_nb_pres3 < quantile(dsm_whp_nb_pres3, 0.975)) %>% 
+         mutate(pd_norm = (dsm_whp_nb_pres3-min(dsm_whp_nb_pres3))/diff(range(dsm_whp_nb_pres3))) 
+
+# normalise projected distribution layer for AP
+pr_fgp <- as.data.frame(gpAp_pr, xy = T) %>% 
+         drop_na() %>% 
+         filter(layer > quantile(layer, 0.025) & 
+                layer < quantile(layer, 0.975)) %>% 
+         mutate(pd_norm = (layer-min(layer))/diff(range(layer))) 
+
+# normalise projected distribution layer for BP
+pr_fbp <- as.data.frame(bpAp_pr, xy = T) %>% 
+         drop_na() %>% 
+         filter(layer > quantile(layer, 0.025) & 
+                layer < quantile(layer, 0.975)) %>% 
+         mutate(pd_norm = (layer-min(layer))/diff(range(layer))) 
+```
+
+```{r species maps}
+ggplot() +
+    # set-up plot background etc.
+    geom_sf(fill = 'grey25', data = ccoast) +
+    geom_sf(fill = NA, colour = NA, data = ccoast_buff) +
+    scale_x_longitude(158.8, 158.9, step = 0.1) +
+    # add AP layer #FDE725FF #C36D9AFF
+    geom_raster(aes(x=x, y=y, fill=pd_norm), data = pr_fap) +
+    scale_fill_gradient(low = "transparent", high = "#FDE725FF", aesthetics = 'fill') +
+    theme_bw()
+
+ggplot() +
+    # set-up plot background etc.
+    geom_sf(fill = 'grey25', data = ccoast) +
+    geom_sf(fill = NA, colour = NA, data = ccoast_buff) +
+    scale_x_longitude(158.8, 158.9, step = 0.1) +
+    # add GP layer #440154FF #E0754FFF
+    new_scale_fill() +
+    geom_raster(aes(x=x, y=y, fill=pd_norm), data = pr_fgp) +
+    scale_fill_gradient(low = "transparent", high = "#440154FF", aesthetics = 'fill') +
+    theme_bw()
+
+ggplot() +
+    # set-up plot background etc.
+    geom_sf(fill = 'grey25', data = ccoast) +
+    geom_sf(fill = NA, colour = NA, data = ccoast_buff) +
+    scale_x_longitude(158.8, 158.9, step = 0.1) +
+    # add WHP layer #3CBB75FF #2B5B99FF
+    new_scale_fill() +
+    geom_raster(aes(x=x, y=y, fill=pd_norm), data = pr_fwhp) +
+    scale_fill_gradient(low = "transparent", high = "#3CBB75FF", aesthetics = 'fill') +
+    theme_bw()
+
+ggplot() +
+    # set-up plot background etc.
+    geom_sf(fill = 'grey25', data = ccoast) +
+    geom_sf(fill = NA, colour = NA, data = ccoast_buff) +
+    scale_x_longitude(158.8, 158.9, step = 0.1) +
+    # add BP layer #33638DFF #2A5934FF
+    new_scale_fill() +
+    geom_raster(aes(x=x, y=y, fill=pd_norm), data = pr_fbp) +
+    scale_fill_gradient(low = "transparent", high = "#33638DFF", aesthetics = 'fill') +
+    theme_bw()
+```
+
+
+## Inter-island comparison
+
+The second part of our analysis uses data on Blue Petrels from different islands to model their distribution on each island, and use this model to predict their distribution and abundance on Macquarie, if they occupied the same niche, and at the same density as on comparative islands.
+
+```{r Data exploration1}
+mean(all$dens)
+max(all$dens)
+nrow(all)
+pois <- data.frame(6954*dpois(0:5, 0.04, log = FALSE))
+names(pois)[1] <- "pois"
+x <- 0:5
+pois$levels <- factor(x)
+
+dist <- all %>% group_by(group = cut(dens, breaks = seq(0, max(dens), 1))) %>%
+  summarise(n = n()) %>% mutate(levels = factor(c(1,2,3,4,0)))
+pois <- pois %>% left_join(dist, by = "levels")
+pois <- dplyr::select(pois, levels, pois, n)
+pois[is.na(pois)] <- 0
+pois$pois <- as.integer(pois$pois)
+pois <- pivot_longer(pois, c(pois, n), values_to = "count")
+
+# data don't look zero-inflated, but are probably over-dispersed.
+ggplot(pois, aes(levels, count)) +
+  geom_bar(stat = "identity", position = "dodge", aes(fill = name))
+
+```
+
+```{r Data exploration2}
+# Correlation panel
+panel.cor <- function(x, y){
+    usr <- par("usr"); on.exit(par(usr))
+    par(usr = c(0, 1, 0, 1))
+    r <- round(cor(x, y), digits=2)
+    txt <- paste0("R = ", r)
+    cex.cor <- 0.8/strwidth(txt)
+    text(0.5, 0.5, txt, cex = cex.cor * r)
+}
+# Customize upper panel
+upper.panel<-function(x, y){
+  points(x,y, pch = 19)
+}
+# Pairs plot to examine correlation between factors - BRTs require data that is not highly correlated.
+pairs(all[,c(6:12)], 
+      lower.panel = panel.cor,
+      upper.panel = upper.panel)
+
+# Compare distribution in relation to environmental variables between the three islands
+ggplot(corr) +
+         geom_histogram(aes(val, weight=dens)) +
+         facet_grid(vars(island), vars(var), scales="free", shrink = T) +
+         xlab("Covariate value") +
+         ylab("Density")
+```
+
+```{r load island grids}
+cgrid$isl1 <- factor("macca")
+cgrid$isl2 <- factor("marion")
+cgrid$isl3 <- factor("mayes")
+```
+
+### Boosted regression trees
+
+Diagnostic plots for hierarchical GAMs fit to the pooled data were poor (Pedersen et al. 2019), so in addition we used Boosted Regression Trees (BRT) which behave like an additive regression model. Previous studies show BRTs have high stability and predictive power capable of dealing with patchy datasets with no need for data transformation or removal of outliers (Elith et al. 2008; Guillaumot et al. 2018). We fitted two BRTs and combined them using a delta-lognormal approach (Dedman et al. 2017). BRT1 modelled presence-absence, with predictions on a continuous scale between zero and one being converted into binary predictions maximizing the sum of sensitivity and speciﬁcity (max SSS) as a threshold (Liu et al. 2013). This binary layer was then used as a mask for spatial predictions of abundance from BRT2, a presence-only model of logged density (Dedman et al. 2017). BRTs were built with a Bernoulli distribution, tree complexity = 3, learning rate = 0.01 and bag fraction = 0.5. Models were run for >1,000 trees and evaluated using 10-fold cross validation, then checked for deviance and area under the receiver operating characteristic curve (Elith et al., 2008). ‘Island’ was included as a factor in the BRTs, and inter-island predictions were made by simply renaming the Macquarie Island spatial environmental prediction data as “Marion” or “Mayes”. 
+
+```{r}
+all <- all %>% mutate(pres = case_when(dens > 0 ~ 1,
+                                       TRUE ~ 0),
+                      log_dens = log(dens))
+```
+
+```{r step 1}
+# step 1 - model presence-absence. Uses bernoulli (= binomial) model
+# stratify by island
+island <- all %>% group_by(island) %>% count()
+n_folds <- 3 # number of islands
+fold_by_island <- all %>% count(island) %>% arrange(desc(n)) %>% 
+                  mutate(fold = rep(seq_len(n_folds),
+                                    ceiling(n()/n_folds))[seq_len(n())])
+all <- left_join(all, dplyr::select(fold_by_island, island, fold), by = "island")
+
+# BRT model with island as a factor
+brt1 <- gbm.step(data=all, gbm.x = c(1,6:11), gbm.y = 13,
+                        family = "bernoulli", tree.complexity = 3,
+                        learning.rate = 0.01, bag.fraction = 0.5)
+
+# # BRT model with island for cross-validation
+# brt2 <- gbm.step(data=all, gbm.x = c(6:11), gbm.y = 13,
+#                 family = "bernoulli", tree.complexity = 3, 
+#                 n.folds = n_folds, fold.vector = all$fold,
+#                 learning.rate = 0.00005, bag.fraction = 0.5)
+
+```
+
+```{r}
+# BRT density model with island as a factor
+brt3 <- gbm.step(data=filter(all, dens > 0), gbm.x = c(1,6:11), gbm.y = 14,
+                        family = "gaussian", tree.complexity = 3,
+                        learning.rate = 0.01, bag.fraction = 0.5)
+
+# BRT density model with island for cross-validation
+# brt4 <- gbm.step(data=filter(all, dens > 0), gbm.x = c(6:11), gbm.y = 14,
+#                 family = "gaussian", tree.complexity = 3, 
+#                 n.folds = n_folds, fold.vector = all$fold,
+#                 learning.rate = 0.001, bag.fraction = 0.5)
+
+```
+
+#### Inter- and intra-island predictions
+##### Presence-absence
+
+First use the presence-absence model to predict presence-absence island-wide
+
+```{r macca to macca}
+cgrid$island <- cgrid$isl1
+pcc <- predict.gbm(brt1, cgrid, n.trees = brt1$gbm.call$best.trees, type = "response")
+# setup the storage for the predictions
+pccr <- raster(cstack)
+# put the values in, making sure they are numeric first
+pccr <- setValues(pccr, as.numeric(pcc))
+# name the new, last, layer in the stack
+names(pccr) <- "brt1"
+
+```
+
+```{r marion to macca}
+cgrid$island <- cgrid$isl2
+prc <- predict.gbm(brt1, cgrid, n.trees = brt1$gbm.call$best.trees, type = "response")
+# setup the storage for the predictions
+prcr <- raster(cstack)
+# put the values in, making sure they are numeric first
+prcr <- setValues(prcr, as.numeric(prc))
+# name the new, last, layer in the stack
+names(prcr) <- "brt1"
+```
+
+```{r mayes to macca}
+cgrid$island <- cgrid$isl3
+pyc <- predict.gbm(brt1, cgrid, n.trees = brt1$gbm.call$best.trees, type = "response")
+# setup the storage for the predictions
+pycr <- raster(cstack)
+# put the values in, making sure they are numeric first
+pycr <- setValues(pycr, as.numeric(pyc))
+# name the new, last, layer in the stack
+names(pycr) <- "brt1"
+```
+
+##### Density predictions
+
+Density predictions are based on presence-only data so will over-predict. We use the presence-absence predictions to mask the density prediction. Use MaxSSS as the threshold for determining present or absent in a grid cell - see Liu et al. (2013) and Guillaumot et al. (2018) for justification of using MaxSSS. Use this threshold to create a mask layer for each prediction.
+
+```{r MaxSSS}
+# code adapted from SDMPlay and dismo packages
+p <- all %>% filter(pres == 1) %>% 
+     predict.gbm(brt1, ., n.trees = brt1$gbm.call$best.trees, type = "response")
+a <- all %>% filter(pres == 0) %>% 
+     predict.gbm(brt1, ., n.trees = brt1$gbm.call$best.trees, type = "response")
+
+eval.data <- dismo::evaluate(p = p, a = a)
+tab <- base::cbind(eval.data@t, eval.data@TPR + eval.data@TNR)
+maxSSS <- (base::subset(tab, tab[, 2] == max(tab[, 2])))[1, 1]
+```
+
+```{r macca to macca}
+cgrid$island <- cgrid$isl1
+pcc3 <- predict.gbm(brt3, cgrid, n.trees = brt3$gbm.call$best.trees, type = "response")
+# setup the storage for the predictions
+pccr3 <- raster(cstack)
+# put the values in, making sure they are numeric first
+pccr3 <- setValues(pccr, as.numeric(pcc3))
+# name the new, last, layer in the stack
+names(pccr3) <- "brt3"
+# convert logged predictions back into unlogged
+pccr3 <- exp(pccr3)
+
+# create a presence-only mask using MaxSSS
+pccr[pccr < maxSSS] <- NA
+# apply mask
+pccr3 <- mask(pccr3, pccr)
+plot(pccr3)
+
+# work out total estimate
+ccest <- cellStats(pccr3, sum)*400
+```
+
+```{r marion to macca}
+cgrid$island <- cgrid$isl2
+prc3 <- predict.gbm(brt3, cgrid, n.trees = brt3$gbm.call$best.trees, type = "response")
+# setup the storage for the predictions
+prcr3 <- raster(cstack)
+# put the values in, making sure they are numeric first
+prcr3 <- setValues(prcr, as.numeric(prc3))
+# name the new, last, layer in the stack
+names(prcr3) <- "brt3"
+# convert logged predictions back into unlogged
+prcr3 <- exp(prcr3)
+
+# create a presence-only mask using MaxSSS
+prcr[prcr < maxSSS] <- NA
+# apply mask
+prcr3 <- mask(prcr3, prcr)
+plot(prcr3)
+
+# work out total estimate
+rcest <- cellStats(prcr3, sum)*400
+```
+
+```{r mayes to macca}
+cgrid$island <- cgrid$isl3
+pyc3 <- predict.gbm(brt3, cgrid, n.trees = brt1$gbm.call$best.trees, type = "response")
+# setup the storage for the predictions
+pycr3 <- raster(cstack)
+# put the values in, making sure they are numeric first
+pycr3 <- setValues(pycr, as.numeric(pyc3))
+# name the new, last, layer in the stack
+names(pycr3) <- "brt3"
+# convert logged predictions back into unlogged
+pycr3 <- exp(pycr3)
+
+# create a presence-only mask using MaxSSS
+pycr[pycr < maxSSS] <- NA
+# apply mask
+pycr3 <- mask(pycr3, pycr)
+plot(pycr3)
+
+# work out total estimate
+ycest <- cellStats(pycr3, sum)*400
+```
+
+### Figure 3
+
+Figure 3 compares the current distributions of Blue Petrels on Macquarie Island (taken from Bird et al. 2021a) in the first panel, with BRT modelled predictions made above in the remaining panels, one for each island.
+
+```{r}
+# distribution map of surveyed densities
+ggplot() +
+               geom_sf(fill = 'grey', data = ccoast) +
+               geom_sf(fill = NA, colour = NA, data = ccoast_buff) +
+               geom_sf(data = gdat_bp, aes(fill = dens), colour = "transparent", show.legend = T) + #change to aob_d for pop dens
+               scale_fill_scico(palette = "bamako", trans = "log", direction = -1) +
+               scale_x_longitude(158.8, 158.9, step = 0.1) +
+               theme_bw()
+```
+
+```{r}
+# mac prediction
+mac <- as.data.frame(pccr3, xy = T) %>% 
+         drop_na()
+
+# truncate density estimates for mapping - only pixels with >1 breeding pair predicted
+macf <- mac %>% filter(layer > 0.0025) 
+
+ggplot() +
+    # set-up plot background etc.
+    geom_sf(fill = 'grey', data = ccoast) +
+    geom_sf(fill = NA, colour = NA, data = ccoast_buff) +
+    scale_x_longitude(158.8, 158.9, step = 0.1) +
+    # add GP layer
+    geom_raster(data = mac, aes(x=x, y=y, fill=layer), show.legend = T) +
+    scale_fill_scico(palette = "bamako", trans = "log", direction = -1) +
+    theme_bw()
+```
+
+```{r}
+# mar prediction
+mar <- as.data.frame(prcr3, xy = T) %>% 
+         drop_na()
+
+# truncate density estimates for mapping - only pixels with >1 breeding pair predicted
+marf <- mar %>% filter(layer > 0.0025) 
+
+ggplot() +
+    # set-up plot background etc.
+    geom_sf(fill = 'grey', data = ccoast) +
+    geom_sf(fill = NA, colour = NA, data = ccoast_buff) +
+    scale_x_longitude(158.8, 158.9, step = 0.1) +
+    # add GP layer
+    geom_raster(data = mar, aes(x=x, y=y, fill=layer), show.legend = T) +
+    scale_fill_scico(palette = "bamako", trans = "log", direction = -1) +
+    theme_bw()
+```
+
+```{r}
+# may prediction
+may <- as.data.frame(pycr3, xy = T) %>% 
+         drop_na()
+
+# truncate density estimates for mapping - only pixels with >1 breeding pair predicted
+mayf <- may %>% filter(layer > 0.0025) 
+
+ggplot() +
+    # set-up plot background etc.
+    geom_sf(fill = 'grey', data = ccoast) +
+    geom_sf(fill = NA, colour = NA, data = ccoast_buff) +
+    scale_x_longitude(158.8, 158.9, step = 0.1) +
+    # add GP layer
+    geom_raster(data = may, aes(x=x, y=y, fill=layer), show.legend = T) +
+    scale_fill_scico(palette = "bamako", trans = "log", direction = -1) +
+    theme_bw()
+```
